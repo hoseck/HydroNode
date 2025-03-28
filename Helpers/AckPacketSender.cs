@@ -48,9 +48,14 @@ namespace HydroNode.Helpers
 
         public static async Task SendAckAsync(NetworkStream stream)
         {
-            byte[] ack = CreateAckPacket();
+            var ack = new byte[] { 0x02, 0x01, 0x00, 0x00, 0x00, 0x09, 0x81, 0x00, 0x03 }; // ACK 
             await stream.WriteAsync(ack, 0, ack.Length);
-            await stream.FlushAsync();
+        }
+
+        public static async Task SendNekAsync(NetworkStream stream)
+        {
+            var nek = new byte[] { 0x02, 0x01, 0x00, 0x00, 0x00, 0x09, 0xF1, 0x00, 0x03 }; // NEK 
+            await stream.WriteAsync(nek, 0, nek.Length);
         }
     }
 }
