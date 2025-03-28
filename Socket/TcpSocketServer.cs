@@ -33,71 +33,79 @@ namespace HydroNode.Socket
         public async Task StartAsync(CancellationToken token)
         {
             _listener.Start();
-            _logger.LogInformation("TCP 서버 시작됨 (6000)");
+            _logger.LogInformation("TCP 서버 시작됨 (1993)");
 
             while (!token.IsCancellationRequested)
             {
-                var client = await _listener.AcceptTcpClientAsync(token);
-                _logger.LogInformation("TCP 클라이언트 접속됨");
-
-                _ = Task.Run(async () =>
+                try
                 {
-                    using var stream = client.GetStream();
-                    var buffer = new byte[2048];
-                    
-                    //var buffer = new byte[] {
-                    //    0x02, 0x01, 0x47, 0x00, 0x00, 0x00, 0x01, 0x01,   //TCP Header
-                    //    0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0xfb, 0xe9, 0x07, 0x03, 0x18, 0x13, 0x28, 0x00, 0x07,
-                    //    0x10,
-                    //    0x01,
-                    //    0x16, 0xea, 0xbc, 0x41,
-                    //    0x16,
-                    //    0x00,
-                    //    0x00, 0x00, 0x00, 0x00,
-                    //    0x06,
-                    //    0x01,
-                    //    0xe5, 0xd0, 0x22, 0x3e,
-                    //    0x06,
-                    //    0x02,
-                    //    0x00, 0x00, 0x00, 0x00,
-                    //    0x01,
-                    //    0x01,
-                    //    0xcd, 0xcc, 0x4c, 0x41,
-                    //    0x01,
-                    //    0x02,
-                    //    0x00, 0x00, 0xc0, 0x3e,
-                    //    0x45,
-                    //    0x01,
-                    //    0x00, 0x00, 0x00, 0x00,
-                    //    0x03   //TCP Tail
-                    //};
-                    int bytesRead = await stream.ReadAsync(buffer, token);
-                    //var received = buffer.Take(bytesRead).ToList();
+                    var client = await _listener.AcceptTcpClientAsync(token);
+                    _logger.LogInformation($"TCP 클라이언트 접속됨: {client.Client.RemoteEndPoint}");
 
-                    //int start = received.IndexOf(0x02);
-                    //int end = received.IndexOf(0x03, start + 1);
-
-                    // var msg = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    // _logger.LogInformation($"[TCP] 수신: {buffer}");
-                    //int length = end - start + 1;
-                    //var packet = received.Skip(start).Take(length).ToArray();
-
-                    var parsed = WrmsPacketParser.Parse(buffer);
-                    // 수위
-                    var sensor = FindSensorBySeparate(parsed.DataList, 0x10);
-                    float waterLevel = sensor?.Value ?? 0f;
-                    // 강우
-                    sensor = FindSensorBySeparate(parsed.DataList, 0x16);
-                    float rainFall = sensor?.Value ?? 0f;
-                    await _db.InsertDataAsync(parsed.DateTime, parsed.DevAddr, waterLevel, rainFall);
-
-                    await AckPacketSender.SendAckAsync(stream);
-
-                    client.Close();
-                }, token);
+                    _ = HandleClientAsync(client, token);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "클라이언트 수락 중 예외 발생");
+                }
             }
 
             _listener.Stop();
+        }
+
+        private async Task HandleClientAsync(TcpClient client, CancellationToken token)
+        {
+            using var stream = client.GetStream();
+            var buffer = new byte[4096];
+            var received = new List<byte>();
+
+            try
+            {
+                while (!token.IsCancellationRequested && client.Connected)
+                {
+                    int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
+                    if (bytesRead == 0)
+                    {
+                        _logger.LogInformation($"클라이언트 연결 종료: {client.Client.RemoteEndPoint}");
+                        break;
+                    }
+
+                    received.AddRange(buffer.Take(bytesRead));
+
+                    // 수신된 데이터에서 가능한 모든 패킷 파싱
+                    while (WrmsPacketParser.TryParse(received.ToArray(), out var parsedPacket, out int usedBytes))
+                    {
+                        received.RemoveRange(0, usedBytes);
+
+                        var sensor = FindSensorBySeparate(parsedPacket.DataList, 0x10); // 수위
+                        float waterLevel = sensor?.Value ?? 0f;
+                        sensor = FindSensorBySeparate(parsedPacket.DataList, 0x16);    // 강우
+                        float rainFall = sensor?.Value ?? 0f;
+
+                        await _db.InsertDataAsync(parsedPacket.DateTime, parsedPacket.DevAddr, waterLevel, rainFall);
+                        await AckPacketSender.SendAckAsync(stream);
+                    }
+
+                    // TryParse 실패 시, 비정상 패킷에 대해 NEK 전송 (조건: 최소 길이 만족)
+                    if (received.Count > 20 && !WrmsPacketParser.IsValidPacket(received.ToArray()))
+                    {
+                        _logger.LogWarning("비정상 패킷 수신 → NEK 전송");
+                        await AckPacketSender.SendNekAsync(stream);
+
+                        // 비정상 패킷 버림 (또는 일부 제거)
+                        received.Clear();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"클라이언트 처리 중 예외 발생: {client.Client?.RemoteEndPoint}");
+            }
+            finally
+            {
+                client.Close();
+                _logger.LogInformation($"클라이언트 연결 해제됨: {client.Client?.RemoteEndPoint}");
+            }
         }
 
         private SensorData? FindSensorBySeparate(List<SensorData> sensors, byte separate)

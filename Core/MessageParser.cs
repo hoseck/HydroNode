@@ -51,15 +51,20 @@ namespace HydroNode.Core
             public int Length { get; set; }
             public byte PacketType { get; set; }
             public byte DataCount { get; set; }
-            public string DevAddr { get; set; }
-            public string DateTime { get; set; }
+            public string DevAddr { get; set; } = string.Empty;
+            public string DateTime { get; set; } = string.Empty;
             public byte Usage { get; set; }
             public List<SensorData> DataList { get; set; } = new List<SensorData>();
             public byte Tail { get; set; }
         }
 
-        public static ParsedPacket Parse(byte[] buffer)
+        public static ParsedPacket? Parse(byte[] buffer)
         {
+            if (!IsValidPacket (buffer))
+            {
+                return null;
+            }
+
             int offset = 0;
 
             var result = new ParsedPacket();
@@ -130,6 +135,42 @@ namespace HydroNode.Core
             result.Tail = buffer[offset++];
 
             return result;
+        }
+
+        public static bool TryParse(byte[] buffer, out WrmsPacketParser.ParsedPacket? parsed, out int usedBytes)
+        {
+            parsed = null;
+            usedBytes = 0;
+
+            int length = BitConverter.ToInt32(buffer, 2);
+
+            // 전체 바이트 중 정상 패킷 하나 존재함
+            var packetBytes = buffer.Take(length).ToArray();
+            parsed = WrmsPacketParser.Parse(packetBytes);
+            usedBytes = length;
+
+            return parsed != null;
+        }
+
+        public static bool IsValidPacket(byte[] packet)
+        {
+            if (packet == null || packet.Length < 35)
+                return false;
+
+            // 1. HEADER 체크
+            if (packet[0] != 0x02)
+                return false;
+
+            // 2. TAIL 체크
+            if (packet[packet[2] - 1]!= 0x03)
+                return false;
+
+            // 3. LENGTH 확인 (4바이트, BigEndian 가정)
+            //int lengthFromPacket = (packet[2] << 24) | (packet[3] << 16) | (packet[4] << 8) | packet[5];
+            //if (lengthFromPacket != packet.Length)
+            //    return false;
+
+            return true;
         }
     }
 }
